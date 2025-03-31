@@ -1,0 +1,174 @@
+---
+title: "example"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE,results="show")
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(purrr)
+library(broom)
+library(tidyr)
+library(forcats)
+
+data <- read_csv("C:/Users/hp/Desktop/adgs_report_shiyuan/df_for_stepwise_regression.csv")
+
+cat("数据维度:", dim(data), "\n\n")
+cat("前6行数据:\n")
+head(data) %>% knitr::kable()
+
+# 正确的数据预处理代码
+data_clean <- data %>%
+  # 1. 处理缺失值（仅对数值列）
+  mutate(across(where(is.numeric), ~ifelse(is.na(.), mean(., na.rm = TRUE), .))) %>%  # 注意这里闭合了第一个mutate
+  # 2. 标准化预测变量（排除响应变量）
+  mutate(across(
+    where(is.numeric) & !all_of("GPP_NT_VUT_REF"), 
+    ~as.numeric(scale(.))
+  ))  # 这里闭合了第二个mutate和整个管道
+
+# print result 
+cat("\n处理后数据概览:\n")
+glimpse(data_clean)
+
+response <- "GPP_NT_VUT_REF"
+predictors <- setdiff(names(data_clean), response)
+
+cat("\n响应变量:", response)
+cat("\n初始预测变量数:", length(predictors))
+
+stepwise_forward <- function(data, response, predictors) {
+  selected <- character(0)
+  remaining <- predictors
+  steps <- list()
+  
+  # 初始模型（仅截距）
+  current_formula <- paste(response, "~ 1")
+  current_model <- lm(current_formula, data = data)
+  current_aic <- AIC(current_model)
+  
+  # 第一步：评估所有二元模型（p=1）
+  binary_models <- map(remaining, ~{
+    formula <- as.formula(paste(response, "~", .x))
+    lm(formula, data = data)
+  })
+  
+  model_stats <- tibble(
+    predictor = remaining,
+    r_squared = map_dbl(binary_models, ~summary(.)$r.squared),
+    aic = map_dbl(binary_models, AIC)
+  ) %>%
+    arrange(desc(r_squared))
+  
+  # 选择R²最高的变量
+  best_predictor <- model_stats$predictor[1]
+  selected <- c(selected, best_predictor)
+  remaining <- setdiff(remaining, best_predictor)
+  
+  # 更新模型
+  current_formula <- paste(response, "~", best_predictor)
+  current_model <- lm(current_formula, data = data)
+  current_aic <- AIC(current_model)
+  
+  steps[[1]] <- list(
+    step = 1,
+    variable_added = best_predictor,
+    r_squared = model_stats$r_squared[1],
+    aic = current_aic,
+    formula = current_formula
+  )
+  
+  # 后续步骤
+  step_counter <- 1
+  while(length(remaining) > 0) {
+    step_counter <- step_counter + 1
+    improvement <- tibble(
+      predictor = remaining,
+      aic = map_dbl(remaining, ~{
+        new_formula <- paste(current_formula, "+", .x)
+        AIC(lm(new_formula, data = data))
+      }),
+      r_squared = map_dbl(remaining, ~{
+        new_formula <- paste(current_formula, "+", .x)
+        summary(lm(new_formula, data = data))$r.squared
+      })
+    ) %>%
+      arrange(aic)
+    
+    best_candidate <- improvement[1, ]
+    
+    if (best_candidate$aic < current_aic) {
+      selected <- c(selected, best_candidate$predictor)
+      remaining <- setdiff(remaining, best_candidate$predictor)
+      current_formula <- paste(response, "~", paste(selected, collapse = "+"))
+      current_model <- lm(current_formula, data = data)
+      current_aic <- best_candidate$aic
+      
+      steps[[step_counter]] <- list(
+        step = step_counter,
+        variable_added = best_candidate$predictor,
+        r_squared = best_candidate$r_squared,
+        aic = current_aic,
+        formula = current_formula
+      )
+    } else {
+      break
+    }
+  }
+  
+  return(list(
+    final_model = current_model,
+    selected_vars = selected,
+    steps = bind_rows(steps),
+    final_formula = current_formula
+  ))
+}
+
+set.seed(123)
+result <- stepwise_forward(data_clean, response, predictors)
+
+summary(result$final_model) %>% 
+  broom::tidy() %>% 
+  knitr::kable(digits = 4, caption = "最终模型系数估计")
+
+result$steps %>% 
+  knitr::kable(digits = 4, caption = "变量选择过程记录")
+
+tidy(result$final_model) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(term = forcats::fct_reorder(term, estimate)) %>%  # 明确指定包名
+  ggplot(aes(x = term, y = estimate)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  geom_errorbar(aes(ymin = estimate - std.error, 
+                   ymax = estimate + std.error),
+               width = 0.2) +
+  coord_flip() +
+  labs(title = "标准化回归系数估计",
+       subtitle = "误差条表示95%置信区间",
+       x = NULL, y = "系数大小") +
+  theme_minimal()
+
+par(mfrow = c(2, 2))
+plot(result$final_model)
+par(mfrow = c(1, 1))
+
+# 保存模型对象
+saveRDS(result, "forward_stepwise_result.rds")
+
+# 保存选择过程
+write_csv(result$steps, "variable_selection_steps.csv")
+
+# 保存可视化图形
+ggsave("variable_importance.png", width = 8, height = 6, dpi = 300)
+png("model_diagnostics.png", width = 800, height = 600)
+par(mfrow = c(2, 2))
+plot(result$final_model)
+dev.off()
+  
+```
+
+
+
